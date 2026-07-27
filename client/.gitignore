@@ -13,3 +13,11 @@ __v0_jsx-dev-runtime.ts
 node_modules
 .next/
 .DS_Store
+
+# Next.js auto-generated on `next dev` — should never be committed
+next-env.d.ts
+
+# Competing package-manager lockfiles (project uses bun.lock)
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
