@@ -1,8 +1,9 @@
 spring:
   datasource:
-    url: jdbc:postgresql://localhost:5432/rtdps
-    username: postgres
-    password: postgres
+    # Defaults match docker-compose.yml so `podman compose up postgres` + `./gradlew bootRun` just works.
+    url:      ${POSTGRES_URL:jdbc:postgresql://localhost:5432/rtdps}
+    username: ${POSTGRES_USER:postgres}
+    password: ${POSTGRES_PASSWORD:password}
     driver-class-name: org.postgresql.Driver
 
   jpa:
@@ -30,7 +31,9 @@ spring:
       max-request-size: 50MB
 
   kafka:
-    bootstrap-servers: localhost:9092
+    # 29092 is the EXTERNAL listener exposed to the host machine.
+    # From inside the compose network, override with KAFKA_BOOTSTRAP_SERVERS=kafka:9092.
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:29092}
     producer:
       acks: all
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
