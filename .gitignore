@@ -42,3 +42,13 @@ uploads/
 exports/
 batch-error-logs/
 .DS_Store
+
+### Secrets ###
+.env
+.env.*
+!.env.example
+
+### Data fixtures (may contain PII-shaped data) ###
+src/main/resources/customers.csv
+fixtures/
+!fixtures/README.md

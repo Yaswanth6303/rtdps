@@ -1,0 +1,71 @@
+@startuml architecture_sequence
+title RTDPS — End-to-End Asynchronous Import Flow
+
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam defaultFontName "Helvetica"
+skinparam defaultFontSize 12
+skinparam sequence {
+    ArrowColor #333333
+    ArrowFontColor #333333
+    ActorBackgroundColor #FFEACC
+    ActorBorderColor #C97A1F
+    LifeLineBorderColor #888888
+    LifeLineBackgroundColor #FAFAFA
+    ParticipantBackgroundColor #E8F0FE
+    ParticipantBorderColor #3F6FB2
+    ParticipantFontColor #1F2D3D
+    DatabaseBackgroundColor #FFF4E6
+    DatabaseBorderColor #C97A1F
+    GroupBackgroundColor #F4F6FA
+    GroupBorderColor #888888
+    DividerBackgroundColor #DCE3EF
+    DividerFontColor #1F2D3D
+}
+
+actor "Client" as Client
+participant "JobController" as Ctrl
+database "JobTracker\n(Postgres)" as Tracker
+participant "JobRequest\nProducer" as JRP
+queue "Kafka topic\njob-requests" as KReq
+participant "JobRequest\nConsumer" as JRC
+participant "Spring Batch\nimportJob" as Batch
+database "customers\n(Postgres)" as DB
+participant "JobCompletion\nListener" as JCL
+participant "JobEvent\nProducer" as JEP
+queue "Kafka topic\njob-events" as KEvt
+participant "JobEvent\nConsumer" as JEC
+
+== Submission (returns HTTP 202 immediately) ==
+Client -> Ctrl       : POST /jobs/importCustomers (CSV)
+Ctrl   -> Ctrl       : save file to uploads/
+Ctrl   -> Tracker    : save(status = QUEUED)
+Ctrl   -> JRP        : sendJobRequest(trackerId)
+JRP    -> KReq       : publish JobRequest
+Ctrl  --> Client     : 202 Accepted (trackerId)
+
+== Asynchronous Execution ==
+KReq -> JRC          : consume JobRequest
+JRC  -> Tracker      : update(status = PROCESSING)
+JRC  -> Batch        : launchImportJob(filePath, trackerId)
+
+group Multi-threaded chunked step
+  loop for each chunk (ThreadPoolTaskExecutor, core=10, max=20)
+    Batch -> Batch   : read chunk via SynchronizedItemStreamReader
+    Batch -> Batch   : process (trim, normalize, validate)
+    Batch -> DB      : INSERT ... ON CONFLICT (id) DO NOTHING
+  end
+end
+
+Batch -> JCL         : afterJob(JobExecution)
+JCL   -> Tracker     : update(COMPLETED, read/write/skip, durationMs)
+JCL   -> JEP         : publishJobEvent
+JEP   -> KEvt        : publish JobEvent
+KEvt  -> JEC         : consume (log / dashboard / notify)
+
+== Status Polling (any time) ==
+Client -> Ctrl       : GET /jobs/status/{trackerId}
+Ctrl   -> Tracker    : findById(trackerId)
+Ctrl  --> Client     : JobTracker (status, counts, duration)
+
+@enduml

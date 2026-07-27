@@ -1,6 +1,6 @@
 spring:
   datasource:
-    url: jdbc:h2:mem:testdb
+    url: jdbc:h2:mem:testdb;MODE=PostgreSQL
     driver-class-name: org.h2.Driver
     username: sa
     password:
@@ -10,9 +10,12 @@ spring:
       ddl-auto: create-drop
     show-sql: false
 
+  flyway:
+    enabled: false                  # H2 in-memory; JPA creates schema for the context test
+
   batch:
     jdbc:
-      initialize-schema: ALWAYS
+      initialize-schema: ALWAYS     # batch metadata tables on H2 for context loads
     job:
       enabled: false
 
@@ -20,7 +23,17 @@ spring:
     exclude:
       - org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration
 
+  security:
+    user:
+      name: test
+      password: test
+
 app:
   storage:
     upload-dir: ${java.io.tmpdir}/rtdps-uploads-test
     export-dir: ${java.io.tmpdir}/rtdps-exports-test
+  kafka:
+    replicas: 1
+    min-insync-replicas: 1
+  sweeper:
+    enabled: false                  # don't run reconciliation in unit-context tests

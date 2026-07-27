@@ -1,4 +1,24 @@
 services:
+  app:
+    profiles: ["production"]
+    build: .
+    container_name: rtdps-app
+    ports:
+      - "9191:9191"
+    environment:
+      - POSTGRES_URL=jdbc:postgresql://postgres:5432/rtdps
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - API_USER=admin
+      - API_PASSWORD=admin
+    depends_on:
+      - postgres
+      - kafka
+    volumes:
+      - ./uploads:/app/uploads
+      - ./exports:/app/exports
+
   postgres:
     image: postgres:17
     container_name: rtdps-postgres
@@ -16,6 +36,7 @@ services:
     container_name: rtdps-kafka
     ports:
       - "9092:9092"
+      - "29092:29092"
     environment:
       # KRaft mode (no Zookeeper)
       KAFKA_NODE_ID: 1
@@ -25,10 +46,11 @@ services:
       CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
 
       # Listeners - CONTROLLER is internal only
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # Expose two ports: 9092 for internal Docker network, 29092 for the host Mac
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
 
       # Single node defaults
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1

@@ -11,7 +11,8 @@ import me.yswnthdev.rtdps.dto.JobRequest;
 import me.yswnthdev.rtdps.entity.JobTracker;
 import me.yswnthdev.rtdps.kafka.JobRequestProducer;
 import me.yswnthdev.rtdps.repository.JobTrackerRepository;
-import org.springframework.core.io.FileSystemResource;
+import me.yswnthdev.rtdps.service.ConflictPolicy;
+import me.yswnthdev.rtdps.storage.StorageBackend;
 import org.springframework.core.io.Resource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -19,13 +20,8 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
-import org.springframework.beans.factory.annotation.Value;
 
-import java.io.File;
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
@@ -40,27 +36,29 @@ public class JobController {
 
     private final JobRequestProducer jobRequestProducer;
     private final JobTrackerRepository jobTrackerRepository;
-
-    @Value("${app.storage.upload-dir}")
-    private String uploadDir;
+    private final StorageBackend storage;
 
     // ======================== IMPORT (Async via Kafka) ========================
 
     @Operation(summary = "Import CSV to Database (Async)",
             description = "Upload a CSV file. The import job is queued via Kafka and processed asynchronously. " +
-                    "Use the returned tracker ID to poll job status.")
+                    "Use the returned tracker ID to poll job status. " +
+                    "conflictPolicy=SKIP (default) keeps existing rows untouched and surfaces a conflictCount; " +
+                    "conflictPolicy=UPDATE overwrites existing rows column-for-column.")
     @ApiResponses(value = {
             @ApiResponse(responseCode = "202", description = "Job request accepted and queued"),
-            @ApiResponse(responseCode = "400", description = "Invalid file"),
+            @ApiResponse(responseCode = "400", description = "Invalid file or conflictPolicy"),
             @ApiResponse(responseCode = "500", description = "Failed to process request")
     })
     @PostMapping(value = "/importCustomers", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<Map<String, Object>> importCsvToDBJob(
             @Parameter(description = "CSV file to import")
-            @RequestParam("file") MultipartFile file) {
+            @RequestParam("file") MultipartFile file,
+            @Parameter(description = "How to handle rows whose id already exists. SKIP (default) or UPDATE.")
+            @RequestParam(value = "conflictPolicy", defaultValue = "SKIP") String conflictPolicy) {
 
-        log.info("[JobController] Import request received — file: {}, size: {} bytes",
-                file.getOriginalFilename(), file.getSize());
+        log.info("[JobController] Import request received — file: {}, size: {} bytes, conflictPolicy: {}",
+                file.getOriginalFilename(), file.getSize(), conflictPolicy);
 
         if (file.isEmpty()) {
             return ResponseEntity.badRequest().body(Map.of("error", "File is empty"));
@@ -68,35 +66,37 @@ public class JobController {
 
         String originalFilename = file.getOriginalFilename();
         String contentType = file.getContentType();
-        if (originalFilename == null || (!originalFilename.toLowerCase().endsWith(".csv") && !"text/csv".equals(contentType))) {
+        if (originalFilename == null
+                || (!originalFilename.toLowerCase().endsWith(".csv") && !"text/csv".equals(contentType))) {
             return ResponseEntity.badRequest().body(Map.of("error", "Invalid file type. Only CSV files are allowed."));
         }
 
+        ConflictPolicy policy;
         try {
-            // Save uploaded file
-            Path uploadDirPath = Paths.get(uploadDir);
-            Files.createDirectories(uploadDirPath);
-            String fileName = System.currentTimeMillis() + "_" + originalFilename;
-            Path filePath = uploadDirPath.resolve(fileName);
-            file.transferTo(filePath.toFile());
+            policy = ConflictPolicy.valueOf(conflictPolicy.trim().toUpperCase());
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error", "Invalid conflictPolicy: " + conflictPolicy + ". Must be SKIP or UPDATE."));
+        }
 
-            log.info("[JobController] File saved to: {}", filePath);
+        try {
+            String location = storage.store(file.getInputStream(), originalFilename);
+            log.info("[JobController] File stored at: {}", location);
 
-            // Create job tracker
             JobTracker tracker = JobTracker.builder()
                     .id(UUID.randomUUID().toString())
                     .jobType("IMPORT")
-                    .filePath(filePath.toString())
+                    .filePath(location)
                     .status("QUEUED")
                     .createdAt(LocalDateTime.now())
                     .build();
             jobTrackerRepository.save(tracker);
 
-            // Publish to Kafka
             JobRequest request = JobRequest.builder()
                     .trackerId(tracker.getId())
                     .jobType("IMPORT")
-                    .filePath(filePath.toString())
+                    .filePath(location)
+                    .conflictPolicy(policy.name())
                     .requestedAt(LocalDateTime.now())
                     .build();
             jobRequestProducer.sendJobRequest(request);
@@ -105,13 +105,14 @@ public class JobController {
                     "message", "Import job queued successfully",
                     "trackerId", tracker.getId(),
                     "status", "QUEUED",
-                    "fileName", fileName
+                    "location", location,
+                    "conflictPolicy", policy.name()
             ));
 
         } catch (IOException e) {
-            log.error("[JobController] Failed to save uploaded file", e);
+            log.error("[JobController] Failed to store uploaded file", e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of(
-                    "error", "Failed to save uploaded file: " + e.getMessage()
+                    "error", "Failed to store uploaded file: " + e.getMessage()
             ));
         }
     }
@@ -129,7 +130,6 @@ public class JobController {
     public ResponseEntity<Map<String, Object>> exportCustomersToCSV() {
         log.info("[JobController] Export request received");
 
-        // Create job tracker
         JobTracker tracker = JobTracker.builder()
                 .id(UUID.randomUUID().toString())
                 .jobType("EXPORT")
@@ -138,7 +138,6 @@ public class JobController {
                 .build();
         jobTrackerRepository.save(tracker);
 
-        // Publish to Kafka
         JobRequest request = JobRequest.builder()
                 .trackerId(tracker.getId())
                 .jobType("EXPORT")
@@ -199,7 +198,7 @@ public class JobController {
             ));
         }
 
-        if (!"COMPLETED".equals(tracker.getStatus())) {
+        if (!"COMPLETED".equals(tracker.getStatus()) || tracker.getFilePath() == null) {
             return ResponseEntity.status(HttpStatus.ACCEPTED).body(Map.of(
                     "message", "Export is still processing",
                     "status", tracker.getStatus(),
@@ -207,18 +206,19 @@ public class JobController {
             ));
         }
 
-        File file = new File(tracker.getFilePath());
-        if (!file.exists()) {
+        try {
+            Resource resource = storage.asResource(tracker.getFilePath());
+            String downloadName = "customers_" + trackerId + ".csv";
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=" + downloadName)
+                    .contentType(MediaType.parseMediaType("text/csv"))
+                    .body(resource);
+        } catch (IOException e) {
+            log.error("[JobController] Download failed for {}", trackerId, e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of(
-                    "error", "Export file not found on disk"
+                    "error", "Export object unreadable: " + e.getMessage()
             ));
         }
-
-        Resource resource = new FileSystemResource(file);
-        return ResponseEntity.ok()
-                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=" + file.getName())
-                .contentType(MediaType.parseMediaType("text/csv"))
-                .body(resource);
     }
 
     // ======================== LIST ALL JOBS ========================

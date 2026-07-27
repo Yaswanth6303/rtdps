@@ -1,34 +1,42 @@
 spring:
   datasource:
-    url: jdbc:postgresql://localhost:5432/rtdps
-    username: postgres
-    password: password
+    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/rtdps}
+    username: ${POSTGRES_USER:postgres}
+    password: ${POSTGRES_PASSWORD:}
     driver-class-name: org.postgresql.Driver
 
   jpa:
     hibernate:
-      ddl-auto: update
-    show-sql: true
+      ddl-auto: validate # Flyway owns the schema; JPA only validates mappings
+    show-sql: false # noisy in prod; flip to true locally if you must
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
 
+  flyway:
+    enabled: true
+    baseline-on-migrate: true # tolerate existing dev DBs that pre-date Flyway
+    locations: classpath:db/migration
+
   batch:
     jdbc:
-      initialize-schema: ALWAYS
+      initialize-schema: never # Flyway V1 owns the BATCH_* tables
     job:
-      enabled: false
+      enabled: false # jobs are launched by Kafka consumer, never on boot
 
   servlet:
     multipart:
-      max-file-size: 50MB
-      max-request-size: 50MB
+      max-file-size:    ${UPLOAD_MAX_FILE_SIZE:50MB}     # per-file cap; raise for big CSVs
+      max-request-size: ${UPLOAD_MAX_REQUEST_SIZE:50MB}  # total request cap
 
   kafka:
-    bootstrap-servers: localhost:9092
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     producer:
+      acks: all # wait for all in-sync replicas before ack'ing
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        enable.idempotence: true # safe redelivery: no duplicate-on-retry inside a partition
     consumer:
       group-id: rtdps-group
       auto-offset-reset: earliest
@@ -36,12 +44,72 @@ spring:
       value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
       properties:
         spring.json.trusted.packages: "me.yswnthdev.rtdps.dto"
-        max.poll.interval.ms: 600000
+        # Consumer no longer blocks on batch execution (JobLauncher is async via
+        # TaskExecutorJobLauncher + jobLauncherExecutor), so the default 300s
+        # max.poll.interval.ms is sufficient. Override only if your durable
+        # storage materialize() can take longer than that.
+
+  security:
+    user:
+      name: ${API_USER:admin}
+      password: ${API_PASSWORD:} # MUST be set via env; empty default refuses login
 
 server:
-  port: 9191
+  port: ${SERVER_PORT:9191}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics, prometheus
+      base-path: /actuator
+  endpoint:
+    health:
+      validate-group-membership: false
+      probes:
+        enabled: true # /actuator/health/liveness + /readiness for K8s
+      show-details: when-authorized # show DB / Kafka detail only to authenticated callers
+      group:
+        readiness:
+          include: readinessState, db, kafka # don't take traffic until both are up
+        liveness:
+          include: livenessState # process-only — don't kill on transient DB blip
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+  info:
+    env:
+      enabled: true
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+
+info:
+  app:
+    name: rtdps
+    version: 0.0.1-SNAPSHOT
 
 app:
   storage:
-    upload-dir: ${user.dir}/uploads
-    export-dir: ${user.dir}/exports
+    type: ${STORAGE_TYPE:local} # local | s3 — anything multi-instance must be s3
+    upload-dir: ${UPLOAD_DIR:${user.dir}/uploads}
+    export-dir: ${EXPORT_DIR:${user.dir}/exports}
+    s3:
+      bucket: ${S3_BUCKET:}
+      upload-prefix: ${S3_UPLOAD_PREFIX:uploads/}
+      export-prefix: ${S3_EXPORT_PREFIX:exports/}
+      region: ${S3_REGION:us-east-1}
+      endpoint: ${S3_ENDPOINT:} # leave blank for AWS; set for MinIO / LocalStack
+  kafka:
+    replicas: ${KAFKA_TOPIC_REPLICAS:1} # dev=1, prod=3
+    min-insync-replicas: ${KAFKA_MIN_INSYNC_REPLICAS:1} # dev=1, prod=2
+  alerts:
+    webhook-url: ${ALERTS_WEBHOOK_URL:} # blank = log-only; set to enable webhook publisher
+  sweeper:
+    enabled:                  ${SWEEPER_ENABLED:true}
+    interval-ms:              ${SWEEPER_INTERVAL_MS:60000}            # how often to scan (1 min)
+    initial-delay-ms:         ${SWEEPER_INITIAL_DELAY_MS:30000}       # grace on boot before first scan
+    stuck-threshold-minutes:  ${SWEEPER_STUCK_THRESHOLD_MIN:15}       # forgiveness for long-running jobs

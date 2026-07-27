@@ -26,14 +26,25 @@ public class BatchJobService {
         this.exportJob = exportJob;
     }
 
-    public JobExecution launchImportJob(String filePath, String trackerId) {
-        log.info("[BatchJobService] Launching import job — file: {}, tracker: {}", filePath, trackerId);
+    /**
+     * @param localFilePath      path the batch reader streams from (may be a temp materialization)
+     * @param originalLocation   durable storage location (s3://… or local path) the listener
+     *                           should delete after the job succeeds
+     * @param conflictPolicy     SKIP (default) or UPDATE — drives the writer's ON CONFLICT clause
+     */
+    public JobExecution launchImportJob(String localFilePath, String originalLocation,
+                                        String trackerId, String conflictPolicy) {
+        String resolvedPolicy = (conflictPolicy == null || conflictPolicy.isBlank()) ? "SKIP" : conflictPolicy;
+        log.info("[BatchJobService] Launching import job — local: {}, origin: {}, tracker: {}, policy: {}",
+                localFilePath, originalLocation, trackerId, resolvedPolicy);
 
         BatchErrorLogger.initRun(trackerId);
 
         JobParameters jobParameters = new JobParametersBuilder()
-                .addString("filePath", filePath)
+                .addString("filePath", localFilePath)
+                .addString("originalLocation", originalLocation)
                 .addString("trackerId", trackerId)
+                .addString("conflictPolicy", resolvedPolicy)
                 .addLong("startAt", System.currentTimeMillis())
                 .toJobParameters();
 
@@ -45,11 +56,17 @@ public class BatchJobService {
         }
     }
 
-    public JobExecution launchExportJob(String outputPath, String trackerId) {
-        log.info("[BatchJobService] Launching export job — output: {}, tracker: {}", outputPath, trackerId);
+    /**
+     * @param localOutputPath   temp path the writer fills with the CSV
+     * @param filenameHint      name the listener uses when uploading to durable storage
+     */
+    public JobExecution launchExportJob(String localOutputPath, String filenameHint, String trackerId) {
+        log.info("[BatchJobService] Launching export job — local: {}, hint: {}, tracker: {}",
+                localOutputPath, filenameHint, trackerId);
 
         JobParameters jobParameters = new JobParametersBuilder()
-                .addString("outputPath", outputPath)
+                .addString("outputPath", localOutputPath)
+                .addString("exportFilenameHint", filenameHint)
                 .addString("trackerId", trackerId)
                 .addLong("startAt", System.currentTimeMillis())
                 .toJobParameters();
