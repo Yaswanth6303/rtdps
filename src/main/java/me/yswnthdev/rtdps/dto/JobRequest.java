@@ -13,8 +13,7 @@ import java.time.LocalDateTime;
 @AllArgsConstructor
 public class JobRequest {
     private String trackerId;
-    private String jobType;          // IMPORT / EXPORT
-    private String filePath;         // durable storage location (s3://… or local path)
-    private String conflictPolicy;   // SKIP / UPDATE — only meaningful for IMPORT; null => SKIP
+    private String jobType;          // IMPORT
+    private String filePath;         // local path to the CSV to import
     private LocalDateTime requestedAt;
 }

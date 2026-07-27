@@ -23,17 +23,5 @@ spring:
     exclude:
       - org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration
 
-  security:
-    user:
-      name: test
-      password: test
-
 app:
-  storage:
-    upload-dir: ${java.io.tmpdir}/rtdps-uploads-test
-    export-dir: ${java.io.tmpdir}/rtdps-exports-test
-  kafka:
-    replicas: 1
-    min-insync-replicas: 1
-  sweeper:
-    enabled: false                  # don't run reconciliation in unit-context tests
+  upload-dir: ${java.io.tmpdir}/rtdps-uploads-test

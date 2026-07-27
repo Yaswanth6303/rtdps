@@ -5,8 +5,6 @@ import lombok.extern.slf4j.Slf4j;
 
 import me.yswnthdev.rtdps.entity.Customer;
 import me.yswnthdev.rtdps.listener.JobCompletionListener;
-import me.yswnthdev.rtdps.service.ConflictAwareCustomerWriter;
-import me.yswnthdev.rtdps.service.ConflictPolicy;
 import me.yswnthdev.rtdps.service.CustomerProcessor;
 import me.yswnthdev.rtdps.utils.CustomerFieldSetMapper;
 import org.springframework.batch.core.Job;
@@ -17,8 +15,8 @@ import org.springframework.batch.core.launch.JobLauncher;
 import org.springframework.batch.core.launch.support.TaskExecutorJobLauncher;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.core.step.builder.StepBuilder;
-import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.context.annotation.Primary;
+import org.springframework.batch.item.database.JdbcBatchItemWriter;
+import org.springframework.batch.item.database.builder.JdbcBatchItemWriterBuilder;
 import org.springframework.batch.item.file.FlatFileItemReader;
 import org.springframework.batch.item.file.FlatFileParseException;
 import org.springframework.batch.item.file.LineMapper;
@@ -26,13 +24,14 @@ import org.springframework.batch.item.file.mapping.DefaultLineMapper;
 import org.springframework.batch.item.file.transform.DelimitedLineTokenizer;
 import org.springframework.batch.item.support.SynchronizedItemStreamReader;
 import org.springframework.batch.item.support.builder.SynchronizedItemStreamReaderBuilder;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.task.TaskExecutor;
 import org.springframework.dao.DataAccessException;
-import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.transaction.PlatformTransactionManager;
 
@@ -46,7 +45,6 @@ public class SpringBatchConfig {
     private final JobRepository jobRepository;
     private final PlatformTransactionManager transactionManager;
     private final JobCompletionListener jobCompletionListener;
-    private final DataSource dataSource;
 
     @Bean
     @StepScope
@@ -59,6 +57,7 @@ public class SpringBatchConfig {
         itemReader.setName("csvReader");
         itemReader.setLinesToSkip(1);
         itemReader.setLineMapper(lineMapper(trackerId));
+        // Wrapped in SynchronizedItemStreamReader so multiple worker threads can read safely.
         return new SynchronizedItemStreamReaderBuilder<Customer>()
                 .delegate(itemReader)
                 .build();
@@ -83,28 +82,27 @@ public class SpringBatchConfig {
         return new CustomerProcessor();
     }
 
-    @Bean
-    public NamedParameterJdbcTemplate namedJdbcTemplate() {
-        return new NamedParameterJdbcTemplate(dataSource);
-    }
-
     /**
-     * Step-scoped so the {@code conflictPolicy} JobParameter resolves per execution.
-     * The writer is also a {@code StepExecutionListener} — Spring Batch auto-registers it.
+     * Idempotent upsert writer — {@code ON CONFLICT (id) DO NOTHING} silently
+     * skips rows whose id already exists, so redelivered Kafka messages don't
+     * produce duplicate customers.
      */
     @Bean
-    @StepScope
-    public ConflictAwareCustomerWriter customerWriter(
-            NamedParameterJdbcTemplate namedJdbcTemplate,
-            @Value("#{jobParameters['conflictPolicy']}") String policyName) {
-        ConflictPolicy policy = ConflictPolicy.parseOrDefault(policyName);
-        log.info("[SpringBatchConfig] Writer configured with conflict policy: {}", policy);
-        return new ConflictAwareCustomerWriter(namedJdbcTemplate, policy);
+    public JdbcBatchItemWriter<Customer> customerWriter(DataSource dataSource) {
+        return new JdbcBatchItemWriterBuilder<Customer>()
+                .dataSource(dataSource)
+                .sql("""
+                        INSERT INTO customers (id, first_name, last_name, email, gender, contact_no, country, dob)
+                        VALUES (:id, :firstName, :lastName, :email, :gender, :contactNo, :country, :dob)
+                        ON CONFLICT (id) DO NOTHING
+                        """)
+                .beanMapped()
+                .build();
     }
 
     @Bean
     public Step importStep(SynchronizedItemStreamReader<Customer> reader,
-                           ConflictAwareCustomerWriter customerWriter) {
+                           JdbcBatchItemWriter<Customer> customerWriter) {
         return new StepBuilder("csv-step", jobRepository)
                 .<Customer, Customer>chunk(20, transactionManager)
                 .reader(reader)
@@ -129,6 +127,7 @@ public class SpringBatchConfig {
                 .build();
     }
 
+    /** Threads the chunked import step so one CSV is processed in parallel. */
     @Bean
     public TaskExecutor taskExecutor() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
@@ -143,35 +142,30 @@ public class SpringBatchConfig {
     }
 
     /**
-     * Dedicated pool used by the {@link #jobLauncher(JobRepository, TaskExecutor)}
-     * to actually run jobs. Kept distinct from {@link #taskExecutor()} (which
-     * threads the chunked import step) so a flood of submissions cannot starve
-     * worker threads inside an already-running step, and vice versa.
+     * Dedicated pool used by {@link #asyncJobLauncher} to actually run jobs —
+     * kept distinct from {@link #taskExecutor()} so submissions cannot starve
+     * worker threads inside an already-running step (and vice versa).
      */
     @Bean(name = "jobLauncherExecutor")
     public ThreadPoolTaskExecutor jobLauncherExecutor() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
         executor.setCorePoolSize(4);
         executor.setMaxPoolSize(8);
-        executor.setQueueCapacity(50);              // ~50 dispatched-but-not-yet-started jobs
+        executor.setQueueCapacity(50);
         executor.setThreadNamePrefix("job-launcher-");
         executor.setWaitForTasksToCompleteOnShutdown(true);
-        executor.setAwaitTerminationSeconds(300);   // let in-flight imports finish on SIGTERM
+        executor.setAwaitTerminationSeconds(300);
         executor.initialize();
         return executor;
     }
 
     /**
-     * Async {@code JobLauncher} backed by {@link #jobLauncherExecutor()}.
-     * {@code @Primary} so it wins over Spring Boot's auto-configured synchronous
-     * launcher without triggering a {@code BeanDefinitionOverrideException}.
-     * <p>
-     * Why: the Kafka consumer thread used to block inside {@code launcher.run()}
-     * for the entire duration of the import. A multi-minute CSV would silently
-     * exceed {@code max.poll.interval.ms} → consumer eviction → redelivery →
-     * duplicate {@code JobInstance}. With this bean in place, {@code run()}
-     * returns immediately after dispatching the job; the Kafka offset commits
-     * on the next poll and the consumer is free to pick up the next request.
+     * Async {@code JobLauncher} — {@code run()} returns immediately after
+     * dispatching the job so the Kafka consumer thread isn't blocked for the
+     * duration of a multi-minute import. Prevents {@code max.poll.interval.ms}
+     * eviction and lets the consumer commit its offset and pick up the next
+     * message right away. {@code @Primary} so it wins over Spring Boot's
+     * auto-configured synchronous launcher.
      */
     @Bean
     @Primary

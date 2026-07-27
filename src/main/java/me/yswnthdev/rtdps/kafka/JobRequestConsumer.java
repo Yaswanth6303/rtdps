@@ -6,12 +6,10 @@ import me.yswnthdev.rtdps.dto.JobRequest;
 import me.yswnthdev.rtdps.entity.JobTracker;
 import me.yswnthdev.rtdps.repository.JobTrackerRepository;
 import me.yswnthdev.rtdps.service.BatchJobService;
-import me.yswnthdev.rtdps.storage.StorageBackend;
 import org.springframework.batch.core.JobExecution;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
-import java.nio.file.Path;
 import java.time.LocalDateTime;
 
 @Component
@@ -21,7 +19,6 @@ public class JobRequestConsumer {
 
     private final BatchJobService batchJobService;
     private final JobTrackerRepository jobTrackerRepository;
-    private final StorageBackend storage;
 
     @KafkaListener(topics = "job-requests", groupId = "rtdps-group")
     public void consumeJobRequest(JobRequest request) {
@@ -39,26 +36,9 @@ public class JobRequestConsumer {
         jobTrackerRepository.save(tracker);
 
         try {
-            JobExecution execution;
-
-            if ("IMPORT".equals(request.getJobType())) {
-                // Pull durable copy down to a local path the batch reader can stream.
-                Path localInput = storage.materialize(request.getFilePath());
-                execution = batchJobService.launchImportJob(
-                        localInput.toString(),         // batch reads here
-                        request.getFilePath(),         // durable origin — listener deletes after success
-                        request.getTrackerId(),
-                        request.getConflictPolicy()); // SKIP / UPDATE
-            } else {
-                // Export: allocate a local temp path for the writer; listener uploads to durable storage.
-                Path localOutput = storage.allocateLocalExportPath(request.getTrackerId());
-                String hint = "customers_" + System.currentTimeMillis() + ".csv";
-
-                execution = batchJobService.launchExportJob(
-                        localOutput.toString(),    // batch writes here
-                        hint,                       // filename hint for finalizeFromLocal
-                        request.getTrackerId());
-            }
+            JobExecution execution = batchJobService.launchImportJob(
+                    request.getFilePath(),
+                    request.getTrackerId());
 
             log.info("[JobRequestConsumer] Job launched — tracker: {}, executionId: {}, status: {}",
                     request.getTrackerId(), execution.getId(), execution.getStatus());

@@ -19,15 +19,6 @@ public class JobEvent {
     private long readCount;
     private long writeCount;
     private long skipCount;
-
-    // Honest split of writeCount — populated for IMPORT jobs by ConflictAwareCustomerWriter.
-    private long insertedCount;
-    private long updatedCount;
-    private long conflictCount;
-
-    // Rows dropped by the processor (CustomerProcessor returning null on invalid email).
-    private long filteredCount;
-
     private long durationMs;
     private LocalDateTime completedAt;
 }

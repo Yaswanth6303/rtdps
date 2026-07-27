@@ -44,22 +44,6 @@ public class JobTracker {
     @Builder.Default
     private long durationMs = 0;
 
-    /** Rows that hit the {@code customers} table for the first time. */
-    @Builder.Default
-    private long insertedCount = 0;
-
-    /** Rows whose id already existed and were overwritten (conflictPolicy=UPDATE only). */
-    @Builder.Default
-    private long updatedCount = 0;
-
-    /** Rows silently dropped because id already existed (conflictPolicy=SKIP only). */
-    @Builder.Default
-    private long conflictCount = 0;
-
-    /** Rows the processor dropped by returning null (e.g. invalid email). */
-    @Builder.Default
-    private long filteredCount = 0;
-
     @Column(columnDefinition = "TEXT")
     private String errorMessage;
 
