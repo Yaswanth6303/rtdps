@@ -1,58 +1,43 @@
-import { NextRequest } from "next/server";
+import { NextRequest } from "next/server"
 
-export const maxDuration = 300; // Allow long-running exports/imports up to 5 minutes
-export const dynamic = "force-dynamic";
+const BACKEND = process.env.RTDPS_API_URL ?? "http://localhost:9191"
 
-const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:9191";
-const API_USER = process.env.API_USER || "admin";
-const API_PASSWORD = process.env.API_PASSWORD || "admin";
+// Method-preserving passthrough to the Spring Boot backend. Avoids CORS in
+// the browser (frontend only talks to same-origin /api/proxy/*) and centralises
+// where the backend URL is configured. Streams the body untouched so multipart
+// uploads (POST /jobs/importCustomers) work with no special-casing.
+async function forward(req: NextRequest, path: string[]) {
+  const target = `${BACKEND}/${path.join("/")}${req.nextUrl.search}`
 
-const getBasicAuthHeader = () => {
-  return "Basic " + Buffer.from(`${API_USER}:${API_PASSWORD}`).toString("base64");
-};
+  // Drop headers Next.js/Node manages itself; keep everything else (Content-Type,
+  // Content-Length, etc.) so multipart boundaries survive.
+  const headers = new Headers(req.headers)
+  headers.delete("host")
+  headers.delete("connection")
 
-async function handleRequest(request: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
-  const resolvedParams = await params;
-  const path = resolvedParams.path.join("/");
-  const url = new URL(request.url);
-  const searchParams = url.searchParams.toString();
-  
-  const targetUrl = `${BACKEND_URL}/${path}${searchParams ? `?${searchParams}` : ""}`;
-
-  const headers = new Headers(request.headers);
-  headers.set("Authorization", getBasicAuthHeader());
-  headers.delete("host"); // Let fetch set the host
-  headers.delete("connection");
-
-  try {
-    const backendResponse = await fetch(targetUrl, {
-      method: request.method,
-      headers,
-      body: request.method !== "GET" && request.method !== "HEAD" ? await request.blob() : undefined,
-      duplex: "half",
-    } as RequestInit);
-
-    const responseHeaders = new Headers(backendResponse.headers);
-    // Don't forward chunked encoding header, let NextJS handle encoding
-    responseHeaders.delete("transfer-encoding");
-    responseHeaders.delete("content-encoding");
-
-    return new Response(backendResponse.body, {
-      status: backendResponse.status,
-      statusText: backendResponse.statusText,
-      headers: responseHeaders,
-    });
-  } catch (error) {
-    console.error("Proxy error:", error);
-    return new Response(JSON.stringify({ error: "Failed to connect to backend" }), {
-      status: 502,
-      headers: { "Content-Type": "application/json" },
-    });
+  const init: RequestInit = {
+    method: req.method,
+    headers,
+    // GET/HEAD must not have a body — Node fetch throws otherwise.
+    body: ["GET", "HEAD"].includes(req.method) ? undefined : req.body,
+    // Required when streaming a request body in Node.
+    // @ts-expect-error - duplex is Node-only, missing from lib.dom
+    duplex: "half",
+    cache: "no-store",
   }
+
+  const upstream = await fetch(target, init)
+  return new Response(upstream.body, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers: upstream.headers,
+  })
 }
 
-export const GET = handleRequest;
-export const POST = handleRequest;
-export const PUT = handleRequest;
-export const DELETE = handleRequest;
-export const PATCH = handleRequest;
+type Ctx = { params: Promise<{ path: string[] }> }
+
+export async function GET(req: NextRequest, ctx: Ctx)    { return forward(req, (await ctx.params).path) }
+export async function POST(req: NextRequest, ctx: Ctx)   { return forward(req, (await ctx.params).path) }
+export async function PUT(req: NextRequest, ctx: Ctx)    { return forward(req, (await ctx.params).path) }
+export async function DELETE(req: NextRequest, ctx: Ctx) { return forward(req, (await ctx.params).path) }
+export async function PATCH(req: NextRequest, ctx: Ctx)  { return forward(req, (await ctx.params).path) }
