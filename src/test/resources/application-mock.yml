@@ -1,0 +1,31 @@
+# Profile used by RtdpsApplicationTests only — the fast context-load test that
+# must boot with no external services running. H2 in-memory Postgres, Flyway
+# disabled (JPA create-drop instead), and Kafka autoconfig fully excluded so
+# nothing tries to connect to a broker at boot.
+spring:
+  datasource:
+    url: jdbc:h2:mem:testdb;MODE=PostgreSQL
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: false
+
+  flyway:
+    enabled: false                  # H2 in-memory; JPA creates schema for context load
+
+  batch:
+    jdbc:
+      initialize-schema: ALWAYS     # batch metadata tables on H2
+    job:
+      enabled: false
+
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration
+
+app:
+  upload-dir: ${java.io.tmpdir}/rtdps-uploads-test
