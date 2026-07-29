@@ -5,19 +5,18 @@ services:
     container_name: rtdps-app
     ports:
       - "9191:9191"
+    # In-network overrides — postgres/kafka are compose service names, not host ports.
+    # Kafka INTERNAL listener is on :9092 (advertised as kafka:9092 to other containers).
     environment:
       - POSTGRES_URL=jdbc:postgresql://postgres:5432/rtdps
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=password
       - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
-      - API_USER=admin
-      - API_PASSWORD=admin
     depends_on:
       - postgres
       - kafka
     volumes:
       - ./uploads:/app/uploads
-      - ./exports:/app/exports
 
   postgres:
     image: postgres:17

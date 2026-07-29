@@ -18,12 +18,16 @@ RUN ./gradlew build -x test --no-daemon
 FROM eclipse-temurin:21-jre-jammy
 WORKDIR /app
 
-# Add a non-root user for security
-RUN groupadd -r spring && useradd -r -g spring spring
+# Non-root user + writable /app so JobController can create /app/uploads at runtime
+# (application.yml resolves app.upload-dir to ${user.dir}/uploads = /app/uploads).
+RUN groupadd -r spring \
+ && useradd -r -g spring spring \
+ && mkdir -p /app/uploads \
+ && chown -R spring:spring /app
 USER spring:spring
 
-# Copy the built jar from the build stage
-COPY --from=build /app/build/libs/*.jar app.jar
+# Copy the built jar with correct ownership so the spring user can read it.
+COPY --from=build --chown=spring:spring /app/build/libs/*.jar app.jar
 
 EXPOSE 9191
 

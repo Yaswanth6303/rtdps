@@ -1,0 +1,36 @@
+# --- VCS / build metadata ---
+.git
+.gitignore
+.gradle
+build
+out
+
+# --- Frontend (never shipped inside the Java image) ---
+client
+architecture
+
+# --- IDE ---
+.idea
+.vscode
+*.iml
+*.iws
+*.ipr
+
+# --- Local runtime artefacts ---
+uploads
+exports
+batch-error-logs
+
+# --- Secrets — must never leak into an image ---
+.env
+.env.*
+!.env.example
+
+# --- Docs / misc ---
+docs
+HELP.md
+README.md
+*.md
+
+# --- OS junk ---
+.DS_Store
