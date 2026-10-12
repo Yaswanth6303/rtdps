@@ -10,8 +10,21 @@ import org.springframework.batch.core.JobExecution;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalDateTime;
 
+/**
+ * Launches an import job per {@link JobRequest}. Failures are rethrown, never
+ * swallowed, so the container's {@code DefaultErrorHandler} owns them:
+ * <ul>
+ *   <li>{@link IllegalArgumentException} (bad request, missing tracker or file)
+ *       is non-retryable and goes straight to {@code job-requests.DLT}.</li>
+ *   <li>Anything else (e.g. a transient launch failure) is retried 3× with
+ *       backoff, then sent to the DLT.</li>
+ * </ul>
+ * {@code JobRequestDltConsumer} then marks the tracker FAILED.
+ */
 @Component
 @RequiredArgsConstructor
 @Slf4j
@@ -25,10 +38,24 @@ public class JobRequestConsumer {
         log.info("[JobRequestConsumer] Received job request — tracker: {}, type: {}",
                 request.getTrackerId(), request.getJobType());
 
-        JobTracker tracker = jobTrackerRepository.findById(request.getTrackerId()).orElse(null);
-        if (tracker == null) {
-            log.error("[JobRequestConsumer] Tracker not found: {}", request.getTrackerId());
+        if (request.getTrackerId() == null || request.getFilePath() == null) {
+            throw new IllegalArgumentException("Job request missing trackerId or filePath");
+        }
+
+        JobTracker tracker = jobTrackerRepository.findById(request.getTrackerId())
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "Tracker not found: " + request.getTrackerId()));
+
+        // Kafka is at-least-once — a redelivered request for a job that already
+        // started (or finished) must not launch a second run.
+        if (!"QUEUED".equals(tracker.getStatus())) {
+            log.warn("[JobRequestConsumer] Ignoring duplicate request — tracker: {} is already {}",
+                    tracker.getId(), tracker.getStatus());
             return;
+        }
+
+        if (!Files.isReadable(Path.of(request.getFilePath()))) {
+            throw new IllegalArgumentException("Upload file not readable: " + request.getFilePath());
         }
 
         tracker.setStatus("PROCESSING");
@@ -43,14 +70,14 @@ public class JobRequestConsumer {
             log.info("[JobRequestConsumer] Job launched — tracker: {}, executionId: {}, status: {}",
                     request.getTrackerId(), execution.getId(), execution.getStatus());
 
-        } catch (Exception e) {
-            log.error("[JobRequestConsumer] Failed to process job request — tracker: {}",
-                    request.getTrackerId(), e);
+        } catch (RuntimeException e) {
+            log.error("[JobRequestConsumer] Failed to launch job — tracker: {}", request.getTrackerId(), e);
 
-            tracker.setStatus("FAILED");
-            tracker.setErrorMessage(e.getMessage());
+            // Back to QUEUED so the error handler's retry passes the duplicate guard above.
+            tracker.setStatus("QUEUED");
             tracker.setUpdatedAt(LocalDateTime.now());
             jobTrackerRepository.save(tracker);
+            throw e;
         }
     }
 }

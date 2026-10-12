@@ -47,8 +47,8 @@ RTDPS breaks each with a specific architectural choice:
 | Thread hogging | Kafka + `TaskExecutorJobLauncher` — HTTP returns `202` in ~100ms; job runs on its own thread pool |
 | No progress visibility | `JobTracker` persistence + `GET /jobs/status/{id}` polled by the dashboard every 2s |
 | Transient DB failures | Spring Batch `retry(3)` on `DataAccessException` |
-| Poison messages | Kafka `DefaultErrorHandler` with `FixedBackOff(1000, 3)` → **Dead Letter Topic** → `JobRequestDltConsumer` marks the tracker `FAILED` with origin coordinates |
-| At-least-once delivery | `INSERT ... ON CONFLICT (id) DO NOTHING` — redelivered messages are a no-op at the DB |
+| Poison messages | `ErrorHandlingDeserializer` + `DefaultErrorHandler` with `FixedBackOff(1000, 3)` → **Dead Letter Topic** → `JobRequestDltConsumer` marks the tracker `FAILED`. Malformed JSON and bad requests (missing tracker/file) skip retries and go straight to the DLT |
+| At-least-once delivery | Consumer ignores requests whose tracker is no longer `QUEUED`, and `INSERT ... ON CONFLICT (id) DO NOTHING` makes any re-processed rows a no-op at the DB |
 
 ## Tech stack
 
@@ -114,7 +114,7 @@ id,firstName,lastName,email,gender,contactNo,country,dob
 |---|---|
 | `RtdpsApplicationTests` | Spring context loads without external deps (Kafka mocked, H2 for JPA) |
 | `CustomerProcessorTest` | 7 unit tests — trim, normalize email, capitalize, filter invalid rows |
-| `BatchImportIntegrationTest` | **End-to-end**: real Postgres (Testcontainers) + EmbeddedKafka + MockMvc upload → Awaitility polls the tracker → asserts rows land in `customers` |
+| `BatchImportIntegrationTest` | **End-to-end**: real Postgres (Testcontainers) + EmbeddedKafka + MockMvc upload → Awaitility polls the tracker → asserts rows land in `customers`. Also proves the DLT path: a missing-file request and a malformed JSON payload both end with the tracker `FAILED` via the DLT |
 
 > The integration test needs a container runtime (Podman or Docker). On macOS with Podman:
 > ```bash
@@ -163,8 +163,8 @@ src/main/resources/db/migration/
 ## What makes it interesting to talk about
 
 - **Async decoupling** — the Kafka consumer thread stays non-blocking during multi-minute imports thanks to `TaskExecutorJobLauncher` on a dedicated pool (`jobLauncherExecutor`). Prevents `max.poll.interval.ms` eviction and duplicate `JobInstance`s that a synchronous `JobLauncher` would cause.
-- **Idempotency across two layers** — `INSERT ... ON CONFLICT (id) DO NOTHING` guards against Kafka's at-least-once redelivery at the DB; a unique `startAt` `JobParameter` guards against duplicate Spring Batch job runs.
-- **Fault tolerance** — chunk-level `retry(3)` on `DataAccessException` for transient DB blips; Kafka `DefaultErrorHandler` with `FixedBackOff(1000, 3)` and `addNotRetryableExceptions(DeserializationException, IllegalArgumentException)` so structural failures skip retries and route straight to the DLT.
+- **Idempotency across two layers** — the consumer only launches a job while its tracker is still `QUEUED`, so a redelivered Kafka message can't start a second run; `INSERT ... ON CONFLICT (id) DO NOTHING` makes re-processed rows a no-op at the DB. (The unique `startAt` `JobParameter` does the opposite — it lets every launch be a fresh `JobInstance`.)
+- **Fault tolerance** — chunk-level `retry(3)` on `DataAccessException` for transient DB blips; Kafka `DefaultErrorHandler` with `FixedBackOff(1000, 3)` and `addNotRetryableExceptions(DeserializationException, IllegalArgumentException)` so structural failures skip retries and route straight to the DLT. The consumer rethrows rather than swallowing errors, and the DLT resolver lets Kafka pick the partition (the DLT has 1 partition, the source topic 3).
 - **Multi-threaded chunk step** — `SynchronizedItemStreamReader` + `ThreadPoolTaskExecutor` (core=10, max=20) parallelizes each chunk across workers while keeping the single-file cursor thread-safe.
 - **Schema-as-code** — Flyway V1 bootstraps Spring Batch's metadata tables (extracted verbatim from `spring-batch-core.jar`); V2/V3 own the domain tables. `ddl-auto: validate` catches drift between JPA mappings and reality.
 - **Full observability of state** — every job's read/write/skip counters live in `job_tracker`, and the frontend polls only the active tracker IDs (not the whole list) — O(active) per poll tick, not O(all).

@@ -1,8 +1,11 @@
 package me.yswnthdev.rtdps;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import me.yswnthdev.rtdps.dto.JobRequest;
 import me.yswnthdev.rtdps.entity.JobTracker;
 import me.yswnthdev.rtdps.repository.JobTrackerRepository;
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.serialization.StringSerializer;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -11,7 +14,11 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.kafka.core.DefaultKafkaProducerFactory;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.test.EmbeddedKafkaBroker;
 import org.springframework.kafka.test.context.EmbeddedKafka;
+import org.springframework.kafka.test.utils.KafkaTestUtils;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
@@ -22,7 +29,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.LocalDateTime;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
@@ -77,6 +86,8 @@ class BatchImportIntegrationTest {
     @Autowired JobTrackerRepository trackerRepo;
     @Autowired JdbcTemplate jdbcTemplate;
     @Autowired ObjectMapper objectMapper;
+    @Autowired KafkaTemplate<String, Object> kafkaTemplate;
+    @Autowired EmbeddedKafkaBroker embeddedKafka;
 
     @Test
     @DisplayName("CSV upload → Kafka → async batch → rows landed in customers")
@@ -119,5 +130,58 @@ class BatchImportIntegrationTest {
         assertThat(tracker.getReadCount()).isEqualTo(3);
         assertThat(tracker.getWriteCount()).isEqualTo(3);
         assertThat(tracker.getSkipCount()).isZero();
+    }
+
+    @Test
+    @DisplayName("Request for a missing file → non-retryable → DLT → tracker FAILED")
+    void missingFile_routedToDlt() {
+        String trackerId = saveQueuedTracker("/nonexistent/customers.csv");
+
+        kafkaTemplate.send("job-requests", trackerId, JobRequest.builder()
+                .trackerId(trackerId)
+                .jobType("IMPORT")
+                .filePath("/nonexistent/customers.csv")
+                .requestedAt(LocalDateTime.now())
+                .build());
+
+        awaitFailedViaDlt(trackerId);
+    }
+
+    @Test
+    @DisplayName("Malformed JSON payload → DeserializationException → DLT → tracker FAILED")
+    void malformedPayload_routedToDlt() {
+        String trackerId = saveQueuedTracker("/irrelevant.csv");
+
+        Map<String, Object> props = KafkaTestUtils.producerProps(embeddedKafka);
+        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        KafkaTemplate<String, String> rawTemplate =
+                new KafkaTemplate<>(new DefaultKafkaProducerFactory<>(props));
+        rawTemplate.send("job-requests", trackerId, "{not valid json");
+
+        awaitFailedViaDlt(trackerId);
+    }
+
+    private String saveQueuedTracker(String filePath) {
+        String id = UUID.randomUUID().toString();
+        trackerRepo.save(JobTracker.builder()
+                .id(id)
+                .jobType("IMPORT")
+                .filePath(filePath)
+                .status("QUEUED")
+                .createdAt(LocalDateTime.now())
+                .build());
+        return id;
+    }
+
+    private void awaitFailedViaDlt(String trackerId) {
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(30))
+                .pollInterval(Duration.ofMillis(500))
+                .untilAsserted(() -> {
+                    JobTracker t = trackerRepo.findById(trackerId).orElseThrow();
+                    assertThat(t.getStatus()).isEqualTo("FAILED");
+                    assertThat(t.getErrorMessage()).startsWith("Sent to DLT");
+                });
     }
 }

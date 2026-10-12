@@ -2,6 +2,7 @@ package me.yswnthdev.rtdps.config;
 
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
@@ -64,7 +65,10 @@ public class KafkaConfig {
     @Bean
     public DefaultErrorHandler errorHandler(KafkaTemplate<String, Object> kafkaTemplate) {
         // Failed messages go to Dead Letter Topic after 3 retries with 1-second intervals.
-        DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(kafkaTemplate);
+        // Negative partition lets Kafka pick one — the default resolver reuses the source
+        // partition, which doesn't exist on the 1-partition DLT for records from partitions 1–2.
+        DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(kafkaTemplate,
+                (record, ex) -> new TopicPartition(record.topic() + ".DLT", -1));
         DefaultErrorHandler handler = new DefaultErrorHandler(recoverer, new FixedBackOff(1000L, 3));
         // Don't waste retries on permanent failures — send straight to the DLT.
         handler.addNotRetryableExceptions(
