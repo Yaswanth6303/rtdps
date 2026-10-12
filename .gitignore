@@ -52,3 +52,8 @@ batch-error-logs/
 src/main/resources/customers.csv
 fixtures/
 !fixtures/README.md
+
+### AI tooling local data ###
+.claude-flow/
+.swarm/
+ruvector.db
