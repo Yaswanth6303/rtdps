@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://shieldcn.dev/header/graph.svg?title=RTDPS&subtitle=Event-driven+CSV+ingestion+with+Kafka,+Spring+Batch+and+PostgreSQL&logo=apachekafka&align=left&mode=dark" />
-    <img alt="RTDPS - Real-Time Data Processing System" src="https://shieldcn.dev/header/graph.svg?title=RTDPS&subtitle=Event-driven+CSV+ingestion+with+Kafka,+Spring+Batch+and+PostgreSQL&logo=apachekafka&align=left&mode=light" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://shieldcn.dev/header/graph.svg?title=RTDPS&subtitle=Event-driven+CSV+ingestion+with+Kafka%2C+Spring+Batch+and+PostgreSQL&logo=apachekafka&align=left&mode=dark" />
+    <img alt="RTDPS - Real-Time Data Processing System" src="https://shieldcn.dev/header/graph.svg?title=RTDPS&subtitle=Event-driven+CSV+ingestion+with+Kafka%2C+Spring+Batch+and+PostgreSQL&logo=apachekafka&align=left&mode=light" />
   </picture>
 </p>
 
